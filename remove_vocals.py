@@ -4,6 +4,7 @@
 用法:
     python remove_vocals.py "周慧敏+-+最爱.mp3"
     python remove_vocals.py song.mp3 -o out_dir --model htdemucs_ft --keep-vocals
+    python remove_vocals.py song.mp3 --checkpoint runs/mini/best.pt   # 用自己训练的模型
 
 输出:
     <out_dir>/<歌名>_伴奏.mp3   （去人声的伴奏）
@@ -19,6 +20,8 @@ import soundfile as sf
 import torch
 from demucs.apply import apply_model
 from demucs.pretrained import get_model
+
+from model import load_model, separate_long
 
 
 def load_audio(path: Path, sr: int, channels: int) -> torch.Tensor:
@@ -45,11 +48,16 @@ def save_mp3(wav: torch.Tensor, sr: int, path: Path, bitrate: str) -> None:
 
 
 def separate(input_path: Path, out_dir: Path, model_name: str,
-             keep_vocals: bool, bitrate: str, shifts: int) -> None:
+             keep_vocals: bool, bitrate: str, shifts: int,
+             checkpoint: Path = None) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"加载模型 {model_name} (device={device}) ...")
-    model = get_model(model_name)
-    model.eval()
+    if checkpoint:
+        print(f"加载自训练模型 {checkpoint} (device={device}) ...")
+        model = load_model(checkpoint)
+    else:
+        print(f"加载模型 {model_name} (device={device}) ...")
+        model = get_model(model_name)
+        model.eval()
 
     print(f"读取音频 {input_path.name} ...")
     wav = load_audio(input_path, model.samplerate, model.audio_channels)
@@ -60,10 +68,13 @@ def separate(input_path: Path, out_dir: Path, model_name: str,
     wav = (wav - mean) / std
 
     print("分离中（CPU 上可能需要几分钟）...")
-    with torch.no_grad():
-        sources = apply_model(model, wav[None], device=device,
-                              shifts=shifts, split=True, overlap=0.25,
-                              progress=True)[0]
+    if checkpoint:
+        sources = separate_long(model, wav, device=device, overlap=0.25)
+    else:
+        with torch.no_grad():
+            sources = apply_model(model, wav[None], device=device,
+                                  shifts=shifts, split=True, overlap=0.25,
+                                  progress=True)[0]
     sources = sources * std + mean
 
     vocals_idx = model.sources.index("vocals")
@@ -93,10 +104,12 @@ def main() -> None:
     p.add_argument("--bitrate", default="320k")
     p.add_argument("--shifts", type=int, default=1,
                    help="随机平移次数，越大质量略好但更慢")
+    p.add_argument("-c", "--checkpoint", type=Path,
+                   help="train.py 训练出的 .pt 检查点（指定后忽略 --model/--shifts）")
     args = p.parse_args()
 
     separate(args.input, args.out_dir, args.model,
-             args.keep_vocals, args.bitrate, args.shifts)
+             args.keep_vocals, args.bitrate, args.shifts, args.checkpoint)
 
 
 if __name__ == "__main__":
